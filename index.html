@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Venomia — Viewer 3D</title>
+  <style>
+    html,body{height:100%;margin:0;background:#000;overflow:hidden}
+    canvas{display:block;width:100%;height:100%}
+    #hud{
+      position:fixed;left:12px;bottom:12px;z-index:9999;
+      display:flex;gap:8px;align-items:center;flex-wrap:wrap
+    }
+    #status{
+      background:rgba(0,0,0,.75);color:#fff;border-radius:10px;
+      padding:8px 10px;font:12px system-ui;min-width:180px
+    }
+    .btn{
+      background:#ff5c00;border:0;color:#fff;border-radius:10px;
+      padding:8px 12px;font:12px system-ui;cursor:pointer;font-weight:600
+    }
+    .btn:disabled{opacity:.5;cursor:not-allowed}
+    label{
+      color:#fff;background:rgba(0,0,0,.6);padding:8px 10px;border-radius:10px;
+      font:12px system-ui;display:flex;align-items:center;gap:6px
+    }
+  </style>
+
+  <!-- Libs via UNPKG (stables, non-modules) -->
+  <script src="https://unpkg.com/three@0.152.2/build/three.min.js"></script>
+  <script src="https://unpkg.com/three@0.152.2/examples/js/controls/OrbitControls.js"></script>
+  <script src="https://unpkg.com/three@0.152.2/examples/js/loaders/GLTFLoader.js"></script>
+  <script src="https://unpkg.com/three@0.152.2/examples/js/loaders/DRACOLoader.js"></script>
+</head>
+<body>
+  <canvas id="c"></canvas>
+
+  <div id="hud">
+    <div id="status">Boot…</div>
+    <button id="reset" class="btn" disabled>Réinitialiser vue</button>
+    <label><input type="checkbox" id="idle" checked> Idle auto</label>
+  </div>
+
+  <script>
+    // --- CONFIG: URLs tentées dans cet ordre (ta version d'abord) ---
+    const URLS = [
+      "https://rawcdn.githack.com/YAC73/Venomia/main/robot.glb", // ton .glb (raw -> CORS OK)
+      "https://yac73.github.io/Venomia/robot.glb",                // via GitHub Pages (si le fichier est bien au root)
+      // secours (prouve que le moteur fonctionne même si tes URLs sont KO)
+      "https://threejs.org/examples/models/gltf/Flamingo.glb",
+      "https://rawcdn.githack.com/KhronosGroup/glTF-Sample-Models/master/2.0/Duck/glTF-Binary/Duck.glb"
+    ];
+
+    const statusEl = document.getElementById('status');
+    const setStatus = (m)=>{ statusEl.textContent = m; console.log("[Venomia]", m); };
+
+    // --- RENDERER / SCÈNE ---
+    const canvas = document.getElementById('c');
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias:true });
+    renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
+    renderer.setSize(window.innerWidth, window.innerHeight, false);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x000000);
+
+    const camera = new THREE.PerspectiveCamera(50, window.innerWidth/window.innerHeight, 0.1, 100);
+    camera.position.set(2.5, 1.6, 3.2);
+
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x333366, 0.9));
+    const dir = new THREE.DirectionalLight(0xffffff, 1.1);
+    dir.position.set(3,5,2);
+    scene.add(dir);
+
+    const ground = new THREE.Mesh(
+      new THREE.PlaneGeometry(20,20),
+      new THREE.MeshPhongMaterial({ color:0x111111, shininess:10 })
+    );
+    ground.rotation.x = -Math.PI/2;
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+    const controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.target.set(0, 1.4, 0);
+    controls.enableDamping = true;
+
+    window.addEventListener('resize', () => {
+      renderer.setSize(window.innerWidth, window.innerHeight, false);
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+    });
+
+    // --- LOADER (GLTF + DRACO) ---
+    const loader = new THREE.GLTFLoader();
+    if (THREE.DRACOLoader) {
+      const draco = new THREE.DRACOLoader();
+      draco.setDecoderPath('https://www.gstatic.com/draco/v1/decoders/');
+      loader.setDRACOLoader(draco);
+    }
+
+    let model=null, mixer=null, headBone=null, clock=new THREE.Clock();
+    function findNodeByName(root, names){
+      let res=null; root.traverse(o=>{
+        const n=(o.name||'').toLowerCase();
+        if (names.some(s=>n.includes(s))) res=o;
+      }); return res;
+    }
+
+    function normalizeAndPlaceAtFloor(obj){
+      const box = new THREE.Box3().setFromObject(obj);
+      const size = new THREE.Vector3(); box.getSize(size);
+      const maxDim = Math.max(size.x,size.y,size.z) || 1;
+      const scale = 1.6 / maxDim;            // ~1.6m de haut
+      obj.scale.setScalar(scale);
+      // recalc
+      const box2 = new THREE.Box3().setFromObject(obj);
+      const center = new THREE.Vector3(); box2.getCenter(center);
+      obj.position.sub(center);              // centre à l'origine
+      obj.position.y -= box2.min.y;          // pose sur le sol
+    }
+
+    function loadWithFallback(i=0){
+      if (i>=URLS.length) { setStatus("❌ Échec sur toutes les URLs."); return; }
+      const url = URLS[i];
+      setStatus("Chargement : " + url);
+      loader.load(url, (gltf)=>{
+        model = gltf.scene;
+        model.traverse(o=>{ o.castShadow = true; o.receiveShadow = true; });
+
+        normalizeAndPlaceAtFloor(model);
+        scene.add(model);
+
+        if (gltf.animations && gltf.animations.length) {
+          mixer = new THREE.AnimationMixer(model);
+          mixer.clipAction(gltf.animations[0]).play();
+        }
+        headBone = findNodeByName(model, ['head','mixamorighead','neck','tete']);
+
+        document.getElementById('reset').disabled = false;
+        setStatus("✅ Modèle chargé depuis : " + url);
+      }, undefined, (err)=>{
+        console.warn("Échec:", url, err);
+        setStatus("Échec, on tente la suivante…");
+        loadWithFallback(i+1);
+      });
+    }
+    loadWithFallback(0);
+
+    // --- LOOP + idle ---
+    function loop(){
+      const dt = clock.getDelta();
+      if (mixer) mixer.update(dt);
+
+      if (model && document.getElementById('idle').checked) {
+        const t = performance.now()/1000;
+        const s = 1 + Math.sin(t*2.0)*0.005;
+        model.scale.set(s, 1 + Math.sin(t*2.0)*0.008, s);
+        model.rotation.y = Math.sin(t*0.6)*0.06;
+        if (headBone) {
+          headBone.rotation.y = Math.sin(t*1.4)*0.15;
+          headBone.rotation.x = Math.sin(t*0.9)*0.08;
+        }
+      }
+      controls.update();
+      renderer.render(scene, camera);
+      requestAnimationFrame(loop);
+    }
+    loop();
+
+    // --- UI ---
+    document.getElementById('reset').onclick = ()=>{
+      camera.position.set(2.5, 1.6, 3.2);
+      controls.target.set(0, 1.4, 0);
+      controls.update();
+    };
+  </script>
+</body>
+</html>
